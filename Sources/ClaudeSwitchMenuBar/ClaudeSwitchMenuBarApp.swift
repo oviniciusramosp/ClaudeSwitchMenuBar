@@ -14,11 +14,15 @@ struct ClaudeSwitchMenuBarApp: App {
                 .frame(width: 380)
         } label: {
             if store.menuBarUsageSource == .codex {
-                CodexMenuBarUsageIconView(snapshot: store.codexSnapshot)
+                CodexMenuBarUsageIconView(
+                    snapshot: store.codexSnapshot,
+                    showPercentage: store.showMenuBarUsagePercentage
+                )
             } else {
                 MenuBarUsageIconView(
                     snapshot: store.currentUsageSnapshot,
-                    configuration: store.weeklyResetConfiguration
+                    configuration: store.weeklyResetConfiguration,
+                    showPercentage: store.showMenuBarUsagePercentage
                 )
             }
         }
@@ -58,17 +62,21 @@ enum MenuBarUsageSource: String, CaseIterable, Identifiable {
 final class AccountStore: ObservableObject {
     @AppStorage("autoRestartClaudeAfterSwitch") var autoRestartClaudeAfterSwitch = true
     @AppStorage("menuBarUsageSource") private var menuBarUsageSourceRawValue = MenuBarUsageSource.claude.rawValue
+    @AppStorage("showMenuBarUsagePercentage") var showMenuBarUsagePercentage = false
+    @AppStorage("automaticallyInstallGitHubUpdates") var automaticallyInstallGitHubUpdates = false
     @Published private(set) var accounts: [ManagedAccount] = []
     @Published private(set) var currentEmail: String?
     @Published private(set) var managedCurrentAccountNumber: Int?
     @Published private(set) var isBusy = false
     @Published var statusMessage = "Ready"
     @Published var errorMessage: String?
+    @Published var updateMessage: String?
     @Published private(set) var usageByEmail: [String: ClaudeUsageSnapshot] = [:]
     @Published private(set) var codexSnapshot: CodexUsageSnapshot?
     @Published var settingsAccountEmail: String?
 
     private let service = ClaudeSwitcherService()
+    private let updater = AppUpdater()
     private var refreshTimer: Timer?
     private var weeklyResetOverridesByEmail: [String: WeeklyResetConfiguration] = [:]
 
@@ -78,6 +86,11 @@ final class AccountStore: ObservableObject {
         weeklyResetOverridesByEmail = WeeklyResetOverrideStore.load()
         refresh(forceUsageRefresh: true)
         startUsageRefreshLoop()
+        if automaticallyInstallGitHubUpdates {
+            Task {
+                await checkForAppUpdate(installIfAvailable: true, initiatedManually: false)
+            }
+        }
     }
 
     var canAddCurrentAccount: Bool {
@@ -259,6 +272,39 @@ final class AccountStore: ObservableObject {
         }
     }
 
+    func checkForAppUpdate(installIfAvailable: Bool = false, initiatedManually: Bool = true) async {
+        guard !isBusy else { return }
+        isBusy = true
+        errorMessage = nil
+        updateMessage = "Checking GitHub releases..."
+
+        do {
+            let result = try await updater.checkForUpdate()
+            switch result {
+            case .upToDate(let version):
+                updateMessage = "You're up to date on \(version)."
+            case .updateAvailable(let release):
+                if installIfAvailable {
+                    updateMessage = "Installing \(release.version)..."
+                    try await updater.install(release: release)
+                    return
+                } else {
+                    updateMessage = "Update available: \(release.version)"
+                }
+            case .noCompatibleAsset:
+                updateMessage = "Latest GitHub release has no compatible app asset yet."
+            }
+        } catch {
+            if initiatedManually {
+                errorMessage = error.localizedDescription
+            } else {
+                updateMessage = "Automatic update check failed."
+            }
+        }
+
+        isBusy = false
+    }
+
     private func startUsageRefreshLoop() {
         refreshTimer?.invalidate()
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
@@ -362,13 +408,16 @@ struct MenuBarContentView: View {
     @ObservedObject var store: AccountStore
     @State private var selectedTab: AppTab = .claude
 
+    private var claudeTint: Color { .orange }
+    private var codexTint: Color { .blue }
+
     var body: some View {
         ZStack {
             LinearGradient(
                 colors: [
                     Color.white.opacity(0.04),
                     Color.clear,
-                    Color.accentColor.opacity(0.05)
+                    activeTabTint.opacity(0.06)
                 ],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
@@ -379,9 +428,8 @@ struct MenuBarContentView: View {
 
                 if selectedTab == .claude {
                     VStack(alignment: .leading, spacing: 16) {
-                        claudeOverviewCard
                         accountsSection
-                        actionsSection
+                        addAccountSection
                         footer
                     }
                 }
@@ -414,6 +462,7 @@ struct MenuBarContentView: View {
 
     private func tabButton(_ tab: AppTab, title: String, systemImage: String) -> some View {
         let isSelected = selectedTab == tab
+        let tint = tint(for: tab)
         return Button {
             selectedTab = tab
         } label: {
@@ -428,55 +477,16 @@ struct MenuBarContentView: View {
             .frame(maxWidth: .infinity)
             .background(
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(isSelected ? Color.accentColor.opacity(0.18) : Color.clear)
+                    .fill(isSelected ? tint.opacity(0.18) : Color.clear)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(isSelected ? Color.accentColor.opacity(0.18) : Color.clear, lineWidth: 1)
+                    .stroke(isSelected ? tint.opacity(0.18) : Color.clear, lineWidth: 1)
             )
-            .foregroundStyle(isSelected ? Color.accentColor : Color.primary.opacity(0.82))
+            .foregroundStyle(isSelected ? tint : Color.primary.opacity(0.82))
         }
+        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .buttonStyle(.plain)
-    }
-
-    private var claudeOverviewCard: some View {
-        SurfaceCard {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack(alignment: .top, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Claude Accounts")
-                            .font(.title3.weight(.bold))
-
-                        Text(claudeOverviewSubtitle)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Spacer()
-
-                    statusPill(title: "Claude", tint: .accentColor)
-                }
-
-                overviewMetric(
-                    title: "Current Claude login",
-                    value: store.currentEmail ?? "Not connected",
-                    systemImage: "sparkles.rectangle.stack"
-                )
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(store.statusMessage)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(store.errorMessage == nil ? Color.primary.opacity(0.85) : Color.red)
-
-                    if let errorMessage = store.errorMessage {
-                        Text(errorMessage)
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-            }
-        }
     }
 
     private var codexOverviewCard: some View {
@@ -494,7 +504,7 @@ struct MenuBarContentView: View {
 
                     Spacer()
 
-                    statusPill(title: "Codex", tint: .orange)
+                    statusPill(title: "Codex", tint: codexTint)
                 }
 
                 overviewMetric(
@@ -510,13 +520,6 @@ struct MenuBarContentView: View {
                 }
             }
         }
-    }
-
-    private var claudeOverviewSubtitle: String {
-        if let currentEmail = store.currentEmail {
-            return "Current login: \(currentEmail)"
-        }
-        return "Manage your Claude accounts and switch between them quickly."
     }
 
     private func overviewMetric(title: String, value: String, systemImage: String) -> some View {
@@ -561,6 +564,12 @@ struct MenuBarContentView: View {
                     }
                     .toggleStyle(.switch)
 
+                    Toggle(isOn: $store.showMenuBarUsagePercentage) {
+                        Text("Show percentage to the right of the menu bar chart")
+                            .font(.footnote)
+                    }
+                    .toggleStyle(.switch)
+
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Menu bar chart")
                             .font(.caption)
@@ -577,6 +586,47 @@ struct MenuBarContentView: View {
                         .labelsHidden()
                         .pickerStyle(.segmented)
                     }
+                }
+            }
+
+            SurfaceCard {
+                VStack(alignment: .leading, spacing: 12) {
+                    sectionHeader(
+                        title: "Updates",
+                        subtitle: "Check GitHub Releases and install a newer app build automatically when one is available."
+                    )
+
+                    Toggle(isOn: $store.automaticallyInstallGitHubUpdates) {
+                        Text("Automatically install updates from GitHub Releases")
+                            .font(.footnote)
+                    }
+                    .toggleStyle(.switch)
+
+                    HStack(spacing: 10) {
+                        Button {
+                            Task {
+                                await store.checkForAppUpdate(installIfAvailable: store.automaticallyInstallGitHubUpdates)
+                            }
+                        } label: {
+                            if store.isBusy {
+                                ProgressView()
+                                    .controlSize(.small)
+                            } else {
+                                Label("Check Now", systemImage: "arrow.down.circle")
+                            }
+                        }
+
+                        if let version = updaterCurrentVersionText {
+                            Text("Current version: \(version)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    Text(store.updateMessage ?? "The updater looks for a release asset named `Claude Switch.zip`.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
 
@@ -659,19 +709,35 @@ struct MenuBarContentView: View {
         Calendar.current.weekdaySymbols
     }
 
+    private var updaterCurrentVersionText: String? {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+    }
+
     private var accountsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             sectionHeader(
-                title: "Managed Accounts",
-                subtitle: store.accounts.isEmpty ? "Add your first Claude account after signing in." : "\(store.accounts.count) saved account\(store.accounts.count == 1 ? "" : "s") ready to switch."
+                title: "Configured Accounts",
+                subtitle: configuredAccountsSubtitle
             )
 
             if store.accounts.isEmpty {
                 SurfaceCard {
-                    Text("No saved accounts yet. Log into Claude Code with the account you want, then use Add Current Account.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("No saved accounts yet.")
+                            .font(.subheadline.weight(.semibold))
+
+                        Text("When you connect a Claude account, it will appear here and you can switch back to it anytime.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        if let errorMessage = store.errorMessage {
+                            Text(errorMessage)
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
                 }
             } else {
                 ScrollView {
@@ -684,6 +750,15 @@ struct MenuBarContentView: View {
                 .frame(height: accountListHeight)
             }
         }
+    }
+
+    private var configuredAccountsSubtitle: String {
+        if let currentEmail = store.currentEmail {
+            return "Current login: \(currentEmail)"
+        }
+        return store.accounts.isEmpty
+            ? "Add your first Claude account after signing in."
+            : "\(store.accounts.count) saved account\(store.accounts.count == 1 ? "" : "s") ready to switch."
     }
 
     private var codexSection: some View {
@@ -712,12 +787,12 @@ struct MenuBarContentView: View {
         }
     }
 
-    private var actionsSection: some View {
+    private var addAccountSection: some View {
         SurfaceCard {
             VStack(alignment: .leading, spacing: 12) {
                 sectionHeader(
-                    title: "Quick Actions",
-                    subtitle: "Save the current Claude login, refresh usage, or connect another account through the browser."
+                    title: "Add Another Account",
+                    subtitle: "Save the account you are using now, or connect a different Claude account with browser login."
                 )
 
                 HStack(spacing: 10) {
@@ -742,7 +817,7 @@ struct MenuBarContentView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Connect another account")
+                    Text("Browser login flow")
                         .font(.footnote.weight(.semibold))
 
                     Text("Log out of the current Claude account, start browser login, then return here. The new account is saved automatically when login finishes.")
@@ -765,6 +840,19 @@ struct MenuBarContentView: View {
                 .padding(12)
                 .background(Color.white.opacity(0.04))
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(store.statusMessage)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(store.errorMessage == nil ? Color.primary.opacity(0.85) : Color.red)
+
+                    if let errorMessage = store.errorMessage {
+                        Text(errorMessage)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
             }
         }
     }
@@ -818,11 +906,11 @@ struct MenuBarContentView: View {
         .padding(14)
         .background(
             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(account.isActive ? Color.accentColor.opacity(0.12) : Color.white.opacity(0.05))
+                .fill(account.isActive ? claudeTint.opacity(0.12) : Color.white.opacity(0.05))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(account.isActive ? Color.accentColor.opacity(0.20) : Color.white.opacity(0.06), lineWidth: 1)
+                .stroke(account.isActive ? claudeTint.opacity(0.20) : Color.white.opacity(0.06), lineWidth: 1)
         )
     }
 
@@ -877,6 +965,21 @@ struct MenuBarContentView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var activeTabTint: Color {
+        tint(for: selectedTab)
+    }
+
+    private func tint(for tab: AppTab) -> Color {
+        switch tab {
+        case .claude:
+            return claudeTint
+        case .codex:
+            return codexTint
+        case .settings:
+            return .secondary
         }
     }
 }
@@ -939,27 +1042,11 @@ struct WeeklyUsageSummaryView: View {
                     .font(.caption.weight(.semibold))
             }
 
-            GeometryReader { geometry in
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .fill(Color.white.opacity(0.10))
-                        .frame(height: 10)
-
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .fill(tint)
-                        .frame(width: max(8, geometry.size.width * snapshot.weeklyUtilization), height: 10)
-
-                    Capsule()
-                        .fill(Color.white)
-                        .frame(width: 4, height: 16)
-                        .overlay(
-                            Capsule()
-                                .stroke(Color.black.opacity(0.25), lineWidth: 0.5)
-                        )
-                        .offset(x: max(0, min(geometry.size.width - 4, geometry.size.width * paceMarkerPosition - 2)))
-                }
-            }
-            .frame(height: 16)
+            SegmentedWeeklyProgressBar(
+                progress: snapshot.weeklyUtilization,
+                markerPosition: paceMarkerPosition,
+                tint: tint
+            )
 
             Text(idealLineText)
                 .font(.caption2)
@@ -1012,7 +1099,8 @@ struct CodexAccountCard: View {
                     .font(.caption2.weight(.semibold))
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
-                    .background(Color.orange.opacity(0.16))
+                    .background(Color.blue.opacity(0.16))
+                    .foregroundStyle(Color.blue)
                     .clipShape(Capsule())
             }
 
@@ -1026,27 +1114,11 @@ struct CodexAccountCard: View {
                         .font(.caption.weight(.semibold))
                 }
 
-                GeometryReader { geometry in
-                    ZStack(alignment: .leading) {
-                        RoundedRectangle(cornerRadius: 5, style: .continuous)
-                            .fill(Color.white.opacity(0.10))
-                            .frame(height: 10)
-
-                        RoundedRectangle(cornerRadius: 5, style: .continuous)
-                            .fill(tint)
-                            .frame(width: max(8, geometry.size.width * snapshot.weeklyUtilization), height: 10)
-
-                        Capsule()
-                            .fill(Color.white)
-                            .frame(width: 4, height: 16)
-                            .overlay(
-                                Capsule()
-                                    .stroke(Color.black.opacity(0.25), lineWidth: 0.5)
-                            )
-                            .offset(x: max(0, min(geometry.size.width - 4, geometry.size.width * paceMarkerPosition - 2)))
-                    }
-                }
-                .frame(height: 16)
+                SegmentedWeeklyProgressBar(
+                    progress: snapshot.weeklyUtilization,
+                    markerPosition: paceMarkerPosition,
+                    tint: tint
+                )
 
                 Text("Ideal now: \(snapshot.weeklyIdealPercentText) • \(snapshot.paceLabel)")
                     .font(.caption2)
@@ -1068,37 +1140,102 @@ struct CodexAccountCard: View {
         .padding(14)
         .background(
             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(Color.orange.opacity(0.08))
+                .fill(Color.blue.opacity(0.08))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(Color.orange.opacity(0.14), lineWidth: 1)
+                .stroke(Color.blue.opacity(0.14), lineWidth: 1)
         )
+    }
+}
+
+struct SegmentedWeeklyProgressBar: View {
+    let progress: Double
+    let markerPosition: CGFloat
+    let tint: Color
+
+    private let segmentCount = 7
+    private let spacing: CGFloat = 4
+    private let height: CGFloat = 7
+
+    var body: some View {
+        GeometryReader { geometry in
+            let totalSpacing = spacing * CGFloat(segmentCount - 1)
+            let segmentWidth = max(0, (geometry.size.width - totalSpacing) / CGFloat(segmentCount))
+
+            ZStack(alignment: .leading) {
+                HStack(spacing: spacing) {
+                    ForEach(0..<segmentCount, id: \.self) { index in
+                        let start = Double(index) / Double(segmentCount)
+                        let end = Double(index + 1) / Double(segmentCount)
+                        let fill = max(0, min(1, (progress - start) / (end - start)))
+
+                        ZStack(alignment: .leading) {
+                            RoundedRectangle(cornerRadius: 3.5, style: .continuous)
+                                .fill(Color.white.opacity(0.10))
+
+                            if fill > 0 {
+                                RoundedRectangle(cornerRadius: 3.5, style: .continuous)
+                                    .fill(tint)
+                                    .frame(width: max(2, segmentWidth * fill))
+                            }
+                        }
+                        .frame(width: segmentWidth, height: height)
+                    }
+                }
+
+                Capsule()
+                    .fill(Color.white)
+                    .frame(width: 3, height: 14)
+                    .overlay(
+                        Capsule()
+                            .stroke(Color.black.opacity(0.25), lineWidth: 0.5)
+                    )
+                    .offset(x: max(0, min(geometry.size.width - 3, geometry.size.width * markerPosition - 1.5)))
+            }
+        }
+        .frame(height: 14)
     }
 }
 
 struct MenuBarUsageIconView: View {
     let snapshot: ClaudeUsageSnapshot?
     let configuration: WeeklyResetConfiguration
+    let showPercentage: Bool
 
     var body: some View {
-        Image(nsImage: MenuBarIconRenderer.makeImage(snapshot: snapshot, configuration: configuration))
-            .interpolation(.high)
-            .antialiased(true)
-            .frame(width: 18, height: 18)
+        HStack(spacing: 5) {
+            Image(nsImage: MenuBarIconRenderer.makeImage(snapshot: snapshot, configuration: configuration))
+                .interpolation(.high)
+                .antialiased(true)
+                .frame(width: 18, height: 18)
+
+            if showPercentage, let snapshot {
+                Text(snapshot.weeklyPercentText)
+                    .font(.caption2.monospacedDigit().weight(.semibold))
+            }
+        }
         .accessibilityLabel(snapshot.map { "Weekly usage \($0.weeklyPercentText)" } ?? "Claude Switch")
     }
 }
 
 struct CodexMenuBarUsageIconView: View {
     let snapshot: CodexUsageSnapshot?
+    let showPercentage: Bool
 
     var body: some View {
-        Image(nsImage: CodexMenuBarIconRenderer.makeImage(snapshot: snapshot))
-            .interpolation(.high)
-            .antialiased(true)
-            .frame(width: 18, height: 18)
-            .accessibilityLabel(snapshot.map { "Codex weekly usage \($0.weeklyPercentText)" } ?? "Codex usage")
+        HStack(spacing: 5) {
+            Image(nsImage: CodexMenuBarIconRenderer.makeImage(snapshot: snapshot))
+                .interpolation(.high)
+                .antialiased(true)
+                .frame(width: 18, height: 18)
+
+            if showPercentage, let snapshot {
+                Text(snapshot.weeklyPercentText)
+                    .font(.caption2.monospacedDigit().weight(.semibold))
+            }
+        }
+        .accessibilityLabel(snapshot.map { "Codex weekly usage \($0.weeklyPercentText)" } ?? "Codex usage")
     }
 }
 
@@ -1126,22 +1263,35 @@ enum CodexMenuBarIconRenderer {
             progressPath.appendArc(withCenter: center, radius: radius, startAngle: startAngle, endAngle: endAngle, clockwise: true)
             progressPath.lineWidth = lineWidth
             progressPath.lineCapStyle = .round
-            NSColor.systemOrange.setStroke()
+            color(for: snapshot).setStroke()
             progressPath.stroke()
+
+            drawCenterSymbol(
+                systemName: centerSymbolName(for: snapshot),
+                in: image,
+                color: centerSymbolColor(for: snapshot)
+            )
         } else {
             let fallback = NSImage(systemSymbolName: "chart.pie", accessibilityDescription: "Codex usage")
             fallback?.size = NSSize(width: 14, height: 14)
             fallback?.draw(in: NSRect(x: 2, y: 2, width: 14, height: 14))
         }
 
-        let dotRect = NSRect(x: center.x - 2.2, y: center.y - 2.2, width: 4.4, height: 4.4)
-        let dotPath = NSBezierPath(ovalIn: dotRect)
-        NSColor.tertiaryLabelColor.setFill()
-        dotPath.fill()
-
         image.unlockFocus()
         image.isTemplate = false
         return image
+    }
+
+    private static func color(for snapshot: CodexUsageSnapshot) -> NSColor {
+        snapshot.isAboveExpected ? .systemRed : .labelColor
+    }
+
+    private static func centerSymbolName(for snapshot: CodexUsageSnapshot) -> String {
+        snapshot.isAboveExpected ? "exclamationmark.triangle.fill" : "checkmark"
+    }
+
+    private static func centerSymbolColor(for snapshot: CodexUsageSnapshot) -> NSColor {
+        snapshot.isAboveExpected ? .systemRed : .systemGreen
     }
 }
 
@@ -1173,8 +1323,14 @@ enum MenuBarIconRenderer {
             progressPath.appendArc(withCenter: center, radius: radius, startAngle: startAngle, endAngle: endAngle, clockwise: true)
             progressPath.lineWidth = lineWidth
             progressPath.lineCapStyle = .round
-            color(for: snapshot.paceStatus(using: configuration)).setStroke()
+            let ringColor = color(for: snapshot, configuration: configuration)
+            ringColor.setStroke()
             progressPath.stroke()
+            drawCenterSymbol(
+                systemName: centerSymbolName(for: snapshot, configuration: configuration),
+                in: image,
+                color: centerSymbolColor(for: snapshot, configuration: configuration)
+            )
         } else {
             let fallback = NSImage(systemSymbolName: "chart.pie", accessibilityDescription: "Claude Switch")
                 ?? NSImage(systemSymbolName: "asterisk.circle", accessibilityDescription: "Claude Switch")
@@ -1182,26 +1338,40 @@ enum MenuBarIconRenderer {
             fallback?.draw(in: NSRect(x: 2, y: 2, width: 14, height: 14))
         }
 
-        let dotRect = NSRect(x: center.x - 2.2, y: center.y - 2.2, width: 4.4, height: 4.4)
-        let dotPath = NSBezierPath(ovalIn: dotRect)
-        NSColor.tertiaryLabelColor.setFill()
-        dotPath.fill()
-
         image.unlockFocus()
         image.isTemplate = false
         return image
     }
 
-    private static func color(for status: UsagePaceStatus) -> NSColor {
-        switch status {
-        case .onPace:
-            return .labelColor
-        case .warning:
-            return .systemYellow
-        case .over:
-            return .systemRed
-        }
+    private static func color(for snapshot: ClaudeUsageSnapshot, configuration: WeeklyResetConfiguration) -> NSColor {
+        snapshot.isAboveExpected(using: configuration) ? .systemRed : .labelColor
     }
+
+    private static func centerSymbolName(for snapshot: ClaudeUsageSnapshot, configuration: WeeklyResetConfiguration) -> String {
+        snapshot.isAboveExpected(using: configuration) ? "exclamationmark.triangle.fill" : "checkmark"
+    }
+
+    private static func centerSymbolColor(for snapshot: ClaudeUsageSnapshot, configuration: WeeklyResetConfiguration) -> NSColor {
+        snapshot.isAboveExpected(using: configuration) ? .systemRed : .systemGreen
+    }
+}
+
+private func drawCenterSymbol(systemName: String, in image: NSImage, color: NSColor) {
+    guard let symbol = NSImage(
+        systemSymbolName: systemName,
+        accessibilityDescription: nil
+    )?.withSymbolConfiguration(.init(pointSize: 8, weight: .bold))
+    else {
+        return
+    }
+
+    color.set()
+    symbol.draw(
+        in: NSRect(x: 5, y: 5, width: 8, height: 8),
+        from: .zero,
+        operation: .sourceOver,
+        fraction: 1
+    )
 }
 
 struct ManagedAccount: Identifiable, Equatable {

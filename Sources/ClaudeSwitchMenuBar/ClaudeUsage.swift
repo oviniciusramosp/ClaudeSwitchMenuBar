@@ -44,6 +44,11 @@ struct ClaudeUsageSnapshot: Codable, Sendable {
         (weeklyUtilization - weeklyIdealUtilization(using: configuration)) * 100
     }
 
+    func isAboveExpected(using configuration: WeeklyResetConfiguration) -> Bool {
+        guard weeklyWindowHasStarted || configuration.usesManualOverride else { return false }
+        return weeklyDeltaPercentagePoints(using: configuration) > 0
+    }
+
     func paceStatus(using configuration: WeeklyResetConfiguration) -> UsagePaceStatus {
         guard weeklyWindowHasStarted || configuration.usesManualOverride else { return .onPace }
         let delta = weeklyDeltaPercentagePoints(using: configuration)

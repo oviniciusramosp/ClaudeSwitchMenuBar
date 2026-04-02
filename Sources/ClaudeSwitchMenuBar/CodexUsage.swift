@@ -33,6 +33,10 @@ struct CodexUsageSnapshot: Codable, Sendable {
         (weeklyUtilization - weeklyIdealUtilization) * 100
     }
 
+    var isAboveExpected: Bool {
+        weeklyDeltaPercentagePoints > 0
+    }
+
     var paceStatus: UsagePaceStatus {
         let delta = weeklyDeltaPercentagePoints
         if delta > 3 {
