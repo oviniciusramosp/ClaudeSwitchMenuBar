@@ -38,7 +38,7 @@ enum AppUpdateCheckResult {
 
 enum AppUpdaterError: LocalizedError {
     case invalidReleaseURL
-    case unexpectedResponse
+    case unexpectedResponse(Int, String?)
     case downloadFailed
     case unzipFailed
     case installedAppNotFound
@@ -48,8 +48,17 @@ enum AppUpdaterError: LocalizedError {
         switch self {
         case .invalidReleaseURL:
             return "Invalid GitHub Releases URL."
-        case .unexpectedResponse:
-            return "GitHub Releases returned an unexpected response."
+        case .unexpectedResponse(let status, let body):
+            if status == 404 {
+                return "No GitHub release was found, or the repository needs a token for private access."
+            }
+            if status == 401 || status == 403 {
+                return "GitHub denied access. Add a token with private repo access in Settings."
+            }
+            if let body, !body.isEmpty {
+                return "GitHub Releases error \(status): \(body)"
+            }
+            return "GitHub Releases returned an unexpected response (\(status))."
         case .downloadFailed:
             return "Failed to download the release asset."
         case .unzipFailed:
@@ -67,7 +76,8 @@ struct AppUpdater {
     private let repository = "ClaudeSwitchMenuBar"
     private let expectedAssetName = "Claude Switch.zip"
 
-    func checkForUpdate() async throws -> AppUpdateCheckResult {
+    func checkForUpdate(githubToken: String?) async throws -> AppUpdateCheckResult {
+        let resolvedToken = githubToken ?? loadGitHubCLIToken()
         guard let url = URL(string: "https://api.github.com/repos/\(owner)/\(repository)/releases/latest") else {
             throw AppUpdaterError.invalidReleaseURL
         }
@@ -75,10 +85,17 @@ struct AppUpdater {
         var request = URLRequest(url: url)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("ClaudeSwitchMenuBar", forHTTPHeaderField: "User-Agent")
+        if let resolvedToken, !resolvedToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            request.setValue("Bearer \(resolvedToken)", forHTTPHeaderField: "Authorization")
+        }
 
         let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-            throw AppUpdaterError.unexpectedResponse
+        guard let http = response as? HTTPURLResponse else {
+            throw AppUpdaterError.unexpectedResponse(-1, nil)
+        }
+        guard (200...299).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8)
+            throw AppUpdaterError.unexpectedResponse(http.statusCode, body)
         }
 
         let release = try JSONDecoder().decode(GitHubRelease.self, from: data)
@@ -97,7 +114,8 @@ struct AppUpdater {
         )
     }
 
-    func install(release: AppUpdateRelease) async throws {
+    func install(release: AppUpdateRelease, githubToken: String?) async throws {
+        let resolvedToken = githubToken ?? loadGitHubCLIToken()
         let currentAppURL = Bundle.main.bundleURL
         let applicationsURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications")
         guard currentAppURL.path.hasPrefix(applicationsURL.path) else {
@@ -109,7 +127,15 @@ struct AppUpdater {
         try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
 
         let zipURL = tempDirectory.appendingPathComponent(expectedAssetName)
-        let (downloadedURL, _) = try await URLSession.shared.download(from: release.assetURL)
+        var request = URLRequest(url: release.assetURL)
+        if let resolvedToken, !resolvedToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            request.setValue("Bearer \(resolvedToken)", forHTTPHeaderField: "Authorization")
+            request.setValue("application/octet-stream", forHTTPHeaderField: "Accept")
+        }
+        let (downloadedURL, response) = try await URLSession.shared.download(for: request)
+        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            throw AppUpdaterError.downloadFailed
+        }
         try FileManager.default.moveItem(at: downloadedURL, to: zipURL)
 
         let unpackDirectory = tempDirectory.appendingPathComponent("unpacked", isDirectory: true)
@@ -172,5 +198,27 @@ struct AppUpdater {
         }
 
         return false
+    }
+
+    private func loadGitHubCLIToken() -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["gh", "auth", "token"]
+
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = Pipe()
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else { return nil }
+            let data = output.fileHandleForReading.readDataToEndOfFile()
+            let token = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return token?.isEmpty == false ? token : nil
+        } catch {
+            return nil
+        }
     }
 }

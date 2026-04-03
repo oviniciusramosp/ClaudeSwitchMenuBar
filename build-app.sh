@@ -7,6 +7,7 @@ PRODUCT_NAME="Claude Switch"
 EXECUTABLE_NAME="ClaudeSwitchMenuBar"
 APP_DIR="$ROOT_DIR/dist/$PRODUCT_NAME.app"
 MACOS_DIR="$APP_DIR/Contents/MacOS"
+RESOURCES_DIR="$APP_DIR/Contents/Resources"
 ZIP_PATH="$ROOT_DIR/dist/$PRODUCT_NAME.zip"
 APP_VERSION="${APP_VERSION:-1.0.0}"
 BUILD_VERSION="${BUILD_VERSION:-1}"
@@ -15,7 +16,11 @@ cd "$ROOT_DIR"
 swift build -c release
 
 mkdir -p "$MACOS_DIR"
+mkdir -p "$RESOURCES_DIR"
 cp "$ROOT_DIR/.build/release/$EXECUTABLE_NAME" "$MACOS_DIR/$EXECUTABLE_NAME"
+cp "$ROOT_DIR/ThirdParty/cc-account-switcher/ccswitch.sh" "$RESOURCES_DIR/ccswitch.sh"
+cp "$ROOT_DIR/ThirdParty/cc-account-switcher/LICENSE" "$RESOURCES_DIR/cc-account-switcher-LICENSE"
+chmod +x "$RESOURCES_DIR/ccswitch.sh"
 
 cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

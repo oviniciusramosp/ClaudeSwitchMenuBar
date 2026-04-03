@@ -64,13 +64,16 @@ final class AccountStore: ObservableObject {
     @AppStorage("menuBarUsageSource") private var menuBarUsageSourceRawValue = MenuBarUsageSource.claude.rawValue
     @AppStorage("showMenuBarUsagePercentage") var showMenuBarUsagePercentage = false
     @AppStorage("automaticallyInstallGitHubUpdates") var automaticallyInstallGitHubUpdates = false
+    @AppStorage("githubUpdaterToken") var githubUpdaterToken = ""
     @Published private(set) var accounts: [ManagedAccount] = []
     @Published private(set) var currentEmail: String?
     @Published private(set) var managedCurrentAccountNumber: Int?
     @Published private(set) var isBusy = false
+    @Published private(set) var isCheckingForUpdates = false
     @Published var statusMessage = "Ready"
     @Published var errorMessage: String?
     @Published var updateMessage: String?
+    @Published var updateErrorMessage: String?
     @Published private(set) var usageByEmail: [String: ClaudeUsageSnapshot] = [:]
     @Published private(set) var codexSnapshot: CodexUsageSnapshot?
     @Published var settingsAccountEmail: String?
@@ -273,20 +276,21 @@ final class AccountStore: ObservableObject {
     }
 
     func checkForAppUpdate(installIfAvailable: Bool = false, initiatedManually: Bool = true) async {
-        guard !isBusy else { return }
-        isBusy = true
-        errorMessage = nil
+        guard !isCheckingForUpdates else { return }
+        isCheckingForUpdates = true
+        updateErrorMessage = nil
         updateMessage = "Checking GitHub releases..."
 
         do {
-            let result = try await updater.checkForUpdate()
+            let token = normalizedGitHubToken
+            let result = try await updater.checkForUpdate(githubToken: token)
             switch result {
             case .upToDate(let version):
                 updateMessage = "You're up to date on \(version)."
             case .updateAvailable(let release):
                 if installIfAvailable {
                     updateMessage = "Installing \(release.version)..."
-                    try await updater.install(release: release)
+                    try await updater.install(release: release, githubToken: token)
                     return
                 } else {
                     updateMessage = "Update available: \(release.version)"
@@ -296,13 +300,18 @@ final class AccountStore: ObservableObject {
             }
         } catch {
             if initiatedManually {
-                errorMessage = error.localizedDescription
+                updateErrorMessage = error.localizedDescription
             } else {
-                updateMessage = "Automatic update check failed."
+                updateErrorMessage = error.localizedDescription
             }
         }
 
-        isBusy = false
+        isCheckingForUpdates = false
+    }
+
+    private var normalizedGitHubToken: String? {
+        let trimmed = githubUpdaterToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private func startUsageRefreshLoop() {
@@ -407,6 +416,7 @@ final class AccountStore: ObservableObject {
 struct MenuBarContentView: View {
     @ObservedObject var store: AccountStore
     @State private var selectedTab: AppTab = .claude
+    @State private var isAddAccountExpanded = false
 
     private var claudeTint: Color { .orange }
     private var codexTint: Color { .blue }
@@ -435,7 +445,6 @@ struct MenuBarContentView: View {
                 }
                 else if selectedTab == .codex {
                     VStack(alignment: .leading, spacing: 16) {
-                        codexOverviewCard
                         codexSection
                         codexFooter
                     }
@@ -485,41 +494,10 @@ struct MenuBarContentView: View {
             )
             .foregroundStyle(isSelected ? tint : Color.primary.opacity(0.82))
         }
-        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .frame(maxWidth: .infinity)
+        .background(Color.white.opacity(0.001))
+        .contentShape(Rectangle())
         .buttonStyle(.plain)
-    }
-
-    private var codexOverviewCard: some View {
-        SurfaceCard {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack(alignment: .top, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Codex Usage")
-                            .font(.title3.weight(.bold))
-
-                        Text("Track your Codex weekly and session usage in a dedicated view.")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Spacer()
-
-                    statusPill(title: "Codex", tint: codexTint)
-                }
-
-                overviewMetric(
-                    title: "Connected Codex account",
-                    value: store.codexSnapshot?.email ?? "Not connected",
-                    systemImage: "terminal"
-                )
-
-                if let codexSnapshot = store.codexSnapshot {
-                    Text(codexSnapshot.relativeUpdatedText)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-        }
     }
 
     private func overviewMetric(title: String, value: String, systemImage: String) -> some View {
@@ -558,17 +536,15 @@ struct MenuBarContentView: View {
                         subtitle: "Choose what the menu bar highlights and how switching behaves."
                     )
 
-                    Toggle(isOn: $store.autoRestartClaudeAfterSwitch) {
-                        Text("Restart Claude Code automatically after switch")
-                            .font(.footnote)
-                    }
-                    .toggleStyle(.switch)
+                    settingsToggleRow(
+                        "Restart Claude Code automatically after switch",
+                        isOn: $store.autoRestartClaudeAfterSwitch
+                    )
 
-                    Toggle(isOn: $store.showMenuBarUsagePercentage) {
-                        Text("Show percentage to the right of the menu bar chart")
-                            .font(.footnote)
-                    }
-                    .toggleStyle(.switch)
+                    settingsToggleRow(
+                        "Show percentage to the right of the menu bar chart",
+                        isOn: $store.showMenuBarUsagePercentage
+                    )
 
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Menu bar chart")
@@ -596,11 +572,24 @@ struct MenuBarContentView: View {
                         subtitle: "Check GitHub Releases and install a newer app build automatically when one is available."
                     )
 
-                    Toggle(isOn: $store.automaticallyInstallGitHubUpdates) {
-                        Text("Automatically install updates from GitHub Releases")
-                            .font(.footnote)
+                    settingsToggleRow(
+                        "Automatically install updates from GitHub Releases",
+                        isOn: $store.automaticallyInstallGitHubUpdates
+                    )
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("GitHub token")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        SecureField("Optional token for private repo access", text: $store.githubUpdaterToken)
+                            .textFieldStyle(.roundedBorder)
+
+                        Text("Use a GitHub token with `repo` access if you want the updater to read private releases.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-                    .toggleStyle(.switch)
 
                     HStack(spacing: 10) {
                         Button {
@@ -608,13 +597,14 @@ struct MenuBarContentView: View {
                                 await store.checkForAppUpdate(installIfAvailable: store.automaticallyInstallGitHubUpdates)
                             }
                         } label: {
-                            if store.isBusy {
+                            if store.isCheckingForUpdates {
                                 ProgressView()
                                     .controlSize(.small)
                             } else {
                                 Label("Check Now", systemImage: "arrow.down.circle")
                             }
                         }
+                        .disabled(store.isCheckingForUpdates)
 
                         if let version = updaterCurrentVersionText {
                             Text("Current version: \(version)")
@@ -623,10 +613,24 @@ struct MenuBarContentView: View {
                         }
                     }
 
-                    Text(store.updateMessage ?? "The updater looks for a release asset named `Claude Switch.zip`.")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    if let updateMessage = store.updateMessage {
+                        Text(updateMessage)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        Text("The updater looks for a release asset named `Claude Switch.zip`.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    if let updateErrorMessage = store.updateErrorMessage {
+                        Text(updateErrorMessage)
+                            .font(.caption2)
+                            .foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
 
@@ -649,16 +653,13 @@ struct MenuBarContentView: View {
                     }
                     .disabled(store.accounts.isEmpty)
 
-                    Toggle(
+                    settingsToggleRow(
+                        "Override weekly reset manually for selected account",
                         isOn: Binding(
                             get: { store.configuration(for: store.settingsAccountEmail).usesManualOverride },
                             set: { store.setWeeklyResetManualOverride($0, for: store.settingsAccountEmail) }
                         )
-                    ) {
-                        Text("Override weekly reset manually for selected account")
-                            .font(.footnote)
-                    }
-                    .toggleStyle(.switch)
+                    )
                     .disabled(store.settingsAccountEmail == nil)
 
                     HStack(spacing: 10) {
@@ -740,14 +741,11 @@ struct MenuBarContentView: View {
                     }
                 }
             } else {
-                ScrollView {
-                    VStack(spacing: 8) {
-                        ForEach(store.accounts) { account in
-                            accountRow(account)
-                        }
+                VStack(spacing: 8) {
+                    ForEach(store.accounts) { account in
+                        accountRow(account)
                     }
                 }
-                .frame(height: accountListHeight)
             }
         }
     }
@@ -764,8 +762,8 @@ struct MenuBarContentView: View {
     private var codexSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             sectionHeader(
-                title: "Codex",
-                subtitle: "Track Codex weekly usage here even though switching stays Claude-only."
+                title: "Configured Account",
+                subtitle: codexSubtitle
             )
 
             if let codexSnapshot = store.codexSnapshot {
@@ -787,99 +785,119 @@ struct MenuBarContentView: View {
         }
     }
 
+    private var codexSubtitle: String {
+        if let email = store.codexSnapshot?.email {
+            return "Current login: \(email)"
+        }
+        return "Connect Codex to track weekly and session usage here."
+    }
+
     private var addAccountSection: some View {
         SurfaceCard {
             VStack(alignment: .leading, spacing: 12) {
-                sectionHeader(
-                    title: "Add Another Account",
-                    subtitle: "Save the account you are using now, or connect a different Claude account with browser login."
-                )
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        isAddAccountExpanded.toggle()
+                    }
+                } label: {
+                    HStack(alignment: .center, spacing: 10) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Add Another Account")
+                                .font(.headline)
 
-                HStack(spacing: 10) {
-                    Button {
-                        store.addCurrentAccount()
-                    } label: {
-                        if store.isBusy {
-                            ProgressView()
-                                .controlSize(.small)
-                        } else {
-                            Label("Add Current Account", systemImage: "plus.circle")
+                            Text("Save the account you are using now, or connect a different Claude account with browser login.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
-                    }
-                    .disabled(store.isBusy || !store.canAddCurrentAccount)
 
-                    Button {
-                        store.refresh(forceUsageRefresh: true)
-                    } label: {
-                        Label("Refresh", systemImage: "arrow.clockwise")
+                        Spacer()
+
+                        Image(systemName: isAddAccountExpanded ? "chevron.up" : "chevron.down")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
                     }
-                    .disabled(store.isBusy)
                 }
+                .buttonStyle(.plain)
 
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Browser login flow")
-                        .font(.footnote.weight(.semibold))
-
-                    Text("Log out of the current Claude account, start browser login, then return here. The new account is saved automatically when login finishes.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-
+                if isAddAccountExpanded {
                     HStack(spacing: 10) {
-                        Button("Log Out") {
-                            store.logoutClaude()
+                        Button {
+                            store.addCurrentAccount()
+                        } label: {
+                            if store.isBusy {
+                                ProgressView()
+                                    .controlSize(.small)
+                            } else {
+                                Label("Add Current Account", systemImage: "plus.circle")
+                            }
                         }
-                        .disabled(store.isBusy || store.currentEmail == nil)
+                        .disabled(store.isBusy || !store.canAddCurrentAccount)
 
-                        Button("Browser Login") {
-                            store.loginClaudeInBrowser()
+                        Button {
+                            store.refresh(forceUsageRefresh: true)
+                        } label: {
+                            Label("Refresh", systemImage: "arrow.clockwise")
                         }
                         .disabled(store.isBusy)
                     }
-                }
-                .padding(12)
-                .background(Color.white.opacity(0.04))
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(store.statusMessage)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(store.errorMessage == nil ? Color.primary.opacity(0.85) : Color.red)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Browser login flow")
+                            .font(.footnote.weight(.semibold))
 
-                    if let errorMessage = store.errorMessage {
-                        Text(errorMessage)
+                        Text("Log out of the current Claude account, start browser login, then return here. The new account is saved automatically when login finishes.")
                             .font(.caption)
-                            .foregroundStyle(.red)
+                            .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
+
+                        HStack(spacing: 10) {
+                            Button("Log Out") {
+                                store.logoutClaude()
+                            }
+                            .disabled(store.isBusy || store.currentEmail == nil)
+
+                            Button("Browser Login") {
+                                store.loginClaudeInBrowser()
+                            }
+                            .disabled(store.isBusy)
+                        }
+                    }
+                    .padding(12)
+                    .background(Color.white.opacity(0.04))
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+                    if store.isBusy || store.errorMessage != nil {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(store.statusMessage)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(store.errorMessage == nil ? Color.primary.opacity(0.85) : Color.red)
+
+                            if let errorMessage = store.errorMessage {
+                                Text(errorMessage)
+                                    .font(.caption)
+                                    .foregroundStyle(.red)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
                     }
                 }
             }
         }
     }
 
-    private var accountListHeight: CGFloat {
-        let rowHeight: CGFloat = 142
-        let padding: CGFloat = 8
-        let desired = CGFloat(store.accounts.count) * rowHeight + padding
-        return min(max(desired, 110), 420)
-    }
-
     private func accountRow(_ account: ManagedAccount) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(account.email)
-                        .font(.body.weight(.semibold))
-                        .textSelection(.enabled)
+                    HStack(spacing: 10) {
+                        Image(systemName: account.isActive ? "\(account.number).circle.fill" : "\(account.number).circle")
+                            .font(.body.weight(.semibold))
+                            .foregroundStyle(account.isActive ? claudeTint : .secondary)
 
-                    HStack(spacing: 8) {
-                        Text("Account \(account.number)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-
-                        if account.isActive {
-                            statusPill(title: "Active", tint: .green)
-                        }
+                        Text(account.email)
+                            .font(.body.weight(.semibold))
+                            .textSelection(.enabled)
                     }
                 }
 
@@ -889,7 +907,7 @@ struct MenuBarContentView: View {
                     store.switchToAccount(account)
                 }
                 .disabled(store.isBusy || account.isActive)
-                .controlSize(.large)
+                .buttonStyle(PillActionButtonStyle())
             }
 
             if let snapshot = store.usageSnapshot(for: account.email) {
@@ -916,17 +934,12 @@ struct MenuBarContentView: View {
 
     private var footer: some View {
         HStack {
-            Text("Restart Claude Code after switching.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            Spacer()
-
             Button("Quit") {
                 NSApp.terminate(nil)
             }
             .keyboardShortcut("q")
         }
+        .frame(maxWidth: .infinity, alignment: .trailing)
         .padding(.top, 4)
     }
 
@@ -968,6 +981,20 @@ struct MenuBarContentView: View {
         }
     }
 
+    private func settingsToggleRow(_ title: String, isOn: Binding<Bool>) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            Text(title)
+                .font(.footnote)
+
+            Spacer(minLength: 12)
+
+            Toggle("", isOn: isOn)
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.small)
+        }
+    }
+
     private var activeTabTint: Color {
         tint(for: selectedTab)
     }
@@ -1000,6 +1027,22 @@ struct SurfaceCard<Content: View>: View {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .stroke(Color.white.opacity(0.06), lineWidth: 1)
         )
+    }
+}
+
+struct PillActionButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.caption.weight(.semibold))
+            .padding(.horizontal, 14)
+            .padding(.vertical, 7)
+            .background(Color.white.opacity(configuration.isPressed ? 0.16 : 0.10))
+            .overlay(
+                Capsule()
+                    .stroke(Color.white.opacity(0.08), lineWidth: 1)
+            )
+            .clipShape(Capsule())
+            .scaleEffect(configuration.isPressed ? 0.98 : 1)
     }
 }
 
@@ -1052,13 +1095,23 @@ struct WeeklyUsageSummaryView: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
 
-            Text("Reset: \(snapshot.weeklyResetText(using: configuration))")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+            HStack(spacing: 12) {
+                Label {
+                    Text(snapshot.weeklyResetText(using: configuration))
+                } icon: {
+                    Image(systemName: "calendar")
+                }
 
-            Text(snapshot.relativeUpdatedText)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+
+                Label {
+                    Text(snapshot.relativeUpdatedText)
+                } icon: {
+                    Image(systemName: "arrow.clockwise")
+                }
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
         }
     }
 }
@@ -1124,17 +1177,27 @@ struct CodexAccountCard: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
 
-                Text("Reset: \(snapshot.weeklyResetText)")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-
                 Text("Session: \(snapshot.sessionPercentText) used")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
 
-                Text(snapshot.relativeUpdatedText)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 12) {
+                    Label {
+                        Text(snapshot.weeklyResetText)
+                    } icon: {
+                        Image(systemName: "calendar")
+                    }
+
+                    Spacer(minLength: 0)
+
+                    Label {
+                        Text(snapshot.relativeUpdatedText)
+                    } icon: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             }
         }
         .padding(14)
@@ -1246,8 +1309,8 @@ enum CodexMenuBarIconRenderer {
         image.lockFocus()
 
         let center = CGPoint(x: size.width / 2, y: size.height / 2)
-        let radius: CGFloat = 6.5
-        let lineWidth: CGFloat = 2.6
+        let radius: CGFloat = 6.6
+        let lineWidth: CGFloat = 1.9
 
         let ringPath = NSBezierPath()
         ringPath.appendArc(withCenter: center, radius: radius, startAngle: 0, endAngle: 360)
@@ -1265,12 +1328,6 @@ enum CodexMenuBarIconRenderer {
             progressPath.lineCapStyle = .round
             color(for: snapshot).setStroke()
             progressPath.stroke()
-
-            drawCenterSymbol(
-                systemName: centerSymbolName(for: snapshot),
-                in: image,
-                color: centerSymbolColor(for: snapshot)
-            )
         } else {
             let fallback = NSImage(systemSymbolName: "chart.pie", accessibilityDescription: "Codex usage")
             fallback?.size = NSSize(width: 14, height: 14)
@@ -1283,15 +1340,25 @@ enum CodexMenuBarIconRenderer {
     }
 
     private static func color(for snapshot: CodexUsageSnapshot) -> NSColor {
-        snapshot.isAboveExpected ? .systemRed : .labelColor
+        switch menuBarAlertState(for: snapshot) {
+        case .normal:
+            return .labelColor
+        case .warning:
+            return .systemYellow
+        case .critical:
+            return .systemRed
+        }
     }
 
-    private static func centerSymbolName(for snapshot: CodexUsageSnapshot) -> String {
-        snapshot.isAboveExpected ? "exclamationmark.triangle.fill" : "checkmark"
-    }
-
-    private static func centerSymbolColor(for snapshot: CodexUsageSnapshot) -> NSColor {
-        snapshot.isAboveExpected ? .systemRed : .systemGreen
+    private static func menuBarAlertState(for snapshot: CodexUsageSnapshot) -> MenuBarAlertState {
+        switch snapshot.paceStatus {
+        case .onPace:
+            return .normal
+        case .warning:
+            return snapshot.weeklyDeltaPercentagePoints > 0 ? .warning : .normal
+        case .over:
+            return .critical
+        }
     }
 }
 
@@ -1306,8 +1373,8 @@ enum MenuBarIconRenderer {
         rect.fill()
 
         let center = CGPoint(x: size.width / 2, y: size.height / 2)
-        let radius: CGFloat = 6.5
-        let lineWidth: CGFloat = 2.6
+        let radius: CGFloat = 6.6
+        let lineWidth: CGFloat = 1.9
 
         let ringPath = NSBezierPath()
         ringPath.appendArc(withCenter: center, radius: radius, startAngle: 0, endAngle: 360)
@@ -1326,11 +1393,6 @@ enum MenuBarIconRenderer {
             let ringColor = color(for: snapshot, configuration: configuration)
             ringColor.setStroke()
             progressPath.stroke()
-            drawCenterSymbol(
-                systemName: centerSymbolName(for: snapshot, configuration: configuration),
-                in: image,
-                color: centerSymbolColor(for: snapshot, configuration: configuration)
-            )
         } else {
             let fallback = NSImage(systemSymbolName: "chart.pie", accessibilityDescription: "Claude Switch")
                 ?? NSImage(systemSymbolName: "asterisk.circle", accessibilityDescription: "Claude Switch")
@@ -1344,34 +1406,32 @@ enum MenuBarIconRenderer {
     }
 
     private static func color(for snapshot: ClaudeUsageSnapshot, configuration: WeeklyResetConfiguration) -> NSColor {
-        snapshot.isAboveExpected(using: configuration) ? .systemRed : .labelColor
+        switch menuBarAlertState(for: snapshot, configuration: configuration) {
+        case .normal:
+            return .labelColor
+        case .warning:
+            return .systemYellow
+        case .critical:
+            return .systemRed
+        }
     }
 
-    private static func centerSymbolName(for snapshot: ClaudeUsageSnapshot, configuration: WeeklyResetConfiguration) -> String {
-        snapshot.isAboveExpected(using: configuration) ? "exclamationmark.triangle.fill" : "checkmark"
-    }
-
-    private static func centerSymbolColor(for snapshot: ClaudeUsageSnapshot, configuration: WeeklyResetConfiguration) -> NSColor {
-        snapshot.isAboveExpected(using: configuration) ? .systemRed : .systemGreen
+    private static func menuBarAlertState(for snapshot: ClaudeUsageSnapshot, configuration: WeeklyResetConfiguration) -> MenuBarAlertState {
+        switch snapshot.paceStatus(using: configuration) {
+        case .onPace:
+            return .normal
+        case .warning:
+            return snapshot.weeklyDeltaPercentagePoints(using: configuration) > 0 ? .warning : .normal
+        case .over:
+            return .critical
+        }
     }
 }
 
-private func drawCenterSymbol(systemName: String, in image: NSImage, color: NSColor) {
-    guard let symbol = NSImage(
-        systemSymbolName: systemName,
-        accessibilityDescription: nil
-    )?.withSymbolConfiguration(.init(pointSize: 8, weight: .bold))
-    else {
-        return
-    }
-
-    color.set()
-    symbol.draw(
-        in: NSRect(x: 5, y: 5, width: 8, height: 8),
-        from: .zero,
-        operation: .sourceOver,
-        fraction: 1
-    )
+private enum MenuBarAlertState {
+    case normal
+    case warning
+    case critical
 }
 
 struct ManagedAccount: Identifiable, Equatable {
@@ -1430,7 +1490,22 @@ struct ClaudeSwitcherService {
     private let homeDirectory = FileManager.default.homeDirectoryForCurrentUser
 
     private var scriptPath: String {
-        homeDirectory.appendingPathComponent(".local/share/cc-account-switcher/ccswitch.sh").path
+        if let bundledScriptPath = Bundle.main.path(forResource: "ccswitch", ofType: "sh"),
+           fileManager.isReadableFile(atPath: bundledScriptPath) {
+            return bundledScriptPath
+        }
+
+        let repoScriptPath = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("ThirdParty/cc-account-switcher/ccswitch.sh")
+            .path
+        if fileManager.isReadableFile(atPath: repoScriptPath) {
+            return repoScriptPath
+        }
+
+        return homeDirectory.appendingPathComponent(".local/share/cc-account-switcher/ccswitch.sh").path
     }
 
     private var sequenceURL: URL {

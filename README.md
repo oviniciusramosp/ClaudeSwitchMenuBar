@@ -14,9 +14,10 @@ It lets you:
 
 - macOS 13+
 - Swift 6 toolchain
-- [`cc-account-switcher`](https://github.com/ming86/cc-account-switcher) installed
 - Claude Code installed for account switching
 - Codex installed and authenticated if you want Codex usage tracking
+
+The repository vendors `cc-account-switcher` directly, so you do not need to install it separately for the app to work.
 
 ## Development
 
@@ -61,6 +62,8 @@ These were the main references used while building this project:
 
 - [`ming86/cc-account-switcher`](https://github.com/ming86/cc-account-switcher): underlying Claude account switching workflow and shell integration
 - [`steipete/CodexBar`](https://github.com/steipete/CodexBar): reference for Codex usage fetching, token refresh flow, and menu bar monitoring ideas
+
+The vendored switcher files live in `ThirdParty/cc-account-switcher/` with the original license included.
 
 ## Notes
 
