@@ -278,7 +278,7 @@ extension ClaudeSwitcherService {
     private func requestCodexUsage(credentials: CodexOAuthCredentials) async throws -> CodexUsageResponse {
         let configURL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".codex/config.toml")
-        let configText = try? String(contentsOf: configURL)
+        let configText = try? String(contentsOf: configURL, encoding: .utf8)
         var baseURL = "https://chatgpt.com/backend-api"
         if let line = configText?.split(whereSeparator: \.isNewline).first(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("chatgpt_base_url") }),
            let rawValue = line.split(separator: "=", maxSplits: 1).last

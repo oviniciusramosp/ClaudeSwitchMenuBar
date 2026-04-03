@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import Foundation
+import ServiceManagement
 import SwiftUI
 
 @main
@@ -60,6 +61,7 @@ enum MenuBarUsageSource: String, CaseIterable, Identifiable {
 
 @MainActor
 final class AccountStore: ObservableObject {
+    @AppStorage("launchAtLoginEnabled") var launchAtLoginEnabled = true
     @AppStorage("autoRestartClaudeAfterSwitch") var autoRestartClaudeAfterSwitch = true
     @AppStorage("menuBarUsageSource") private var menuBarUsageSourceRawValue = MenuBarUsageSource.claude.rawValue
     @AppStorage("showMenuBarUsagePercentage") var showMenuBarUsagePercentage = false
@@ -87,6 +89,7 @@ final class AccountStore: ObservableObject {
         usageByEmail = ClaudeUsageSnapshotStore.load()
         codexSnapshot = CodexUsageSnapshotStore.load()
         weeklyResetOverridesByEmail = WeeklyResetOverrideStore.load()
+        syncLaunchAtLogin()
         refresh(forceUsageRefresh: true)
         startUsageRefreshLoop()
         if automaticallyInstallGitHubUpdates {
@@ -314,6 +317,18 @@ final class AccountStore: ObservableObject {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    func syncLaunchAtLogin() {
+        do {
+            if launchAtLoginEnabled {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+        } catch {
+            updateErrorMessage = "Couldn't configure launch at login: \(error.localizedDescription)"
+        }
+    }
+
     private func startUsageRefreshLoop() {
         refreshTimer?.invalidate()
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
@@ -417,6 +432,7 @@ struct MenuBarContentView: View {
     @ObservedObject var store: AccountStore
     @State private var selectedTab: AppTab = .claude
     @State private var isAddAccountExpanded = false
+    @Namespace private var tabSelectionNamespace
 
     private var claudeTint: Color { .orange }
     private var codexTint: Color { .blue }
@@ -427,7 +443,7 @@ struct MenuBarContentView: View {
                 colors: [
                     Color.white.opacity(0.04),
                     Color.clear,
-                    activeTabTint.opacity(0.06)
+                    activeTabTint.opacity(0.05)
                 ],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
@@ -442,14 +458,12 @@ struct MenuBarContentView: View {
                         addAccountSection
                         footer
                     }
-                }
-                else if selectedTab == .codex {
+                } else if selectedTab == .codex {
                     VStack(alignment: .leading, spacing: 16) {
                         codexSection
                         codexFooter
                     }
-                }
-                else {
+                } else {
                     VStack(alignment: .leading, spacing: 16) {
                         settingsHeader
                         settingsSection
@@ -462,42 +476,80 @@ struct MenuBarContentView: View {
     }
 
     private var tabPicker: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             tabButton(.claude, title: "Claude", systemImage: "person.2.fill")
             tabButton(.codex, title: "Codex", systemImage: "terminal")
-            tabButton(.settings, title: "Settings", systemImage: "slider.horizontal.3")
+            tabButton(.settings, title: nil, systemImage: "gear")
+        }
+        .padding(6)
+        .background(.ultraThinMaterial, in: Capsule())
+        .overlay(
+            Capsule()
+                .stroke(Color.white.opacity(0.10), lineWidth: 1)
+        )
+        .padding(.top, 6)
+        .frame(maxWidth: .infinity, alignment: .center)
+    }
+
+    private func tabButton(_ tab: AppTab, title: String?, systemImage: String) -> some View {
+        let isSelected = selectedTab == tab
+        let tint = tint(for: tab)
+        let iconFont: Font = .caption.weight(.semibold)
+
+        return Button {
+            withAnimation(.easeInOut(duration: 0.16)) {
+                selectedTab = tab
+            }
+        } label: {
+            ZStack {
+                if isSelected {
+                    Capsule()
+                        .fill(tint.opacity(0.18))
+                        .overlay(
+                            Capsule()
+                                .stroke(tint.opacity(0.22), lineWidth: 1)
+                        )
+                        .matchedGeometryEffect(id: "selected-tab", in: tabSelectionNamespace)
+                }
+
+                HStack(spacing: 7) {
+                    Image(systemName: systemImage)
+                        .font(iconFont)
+                        .imageScale(title == nil ? .large : .medium)
+                    if let title {
+                        Text(title)
+                            .font(.subheadline.weight(.semibold))
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, title == nil ? 10 : 14)
+                .frame(width: tabWidth(for: tab), height: 34, alignment: .center)
+                .foregroundStyle(isSelected ? tint : Color.primary.opacity(0.82))
+            }
+            .frame(width: tabWidth(for: tab), height: 34, alignment: .center)
+            .contentShape(Capsule())
+        }
+        .frame(width: tabWidth(for: tab), height: 34, alignment: .center)
+        .buttonStyle(.plain)
+    }
+
+    private var activeTabTint: Color {
+        tint(for: selectedTab)
+    }
+
+    private func tint(for tab: AppTab) -> Color {
+        switch tab {
+        case .claude:
+            return claudeTint
+        case .codex:
+            return codexTint
+        case .settings:
+            return .secondary
         }
     }
 
-    private func tabButton(_ tab: AppTab, title: String, systemImage: String) -> some View {
-        let isSelected = selectedTab == tab
-        let tint = tint(for: tab)
-        return Button {
-            selectedTab = tab
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: systemImage)
-                    .font(.caption.weight(.semibold))
-                Text(title)
-                    .font(.subheadline.weight(.semibold))
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .frame(maxWidth: .infinity)
-            .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(isSelected ? tint.opacity(0.18) : Color.clear)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(isSelected ? tint.opacity(0.18) : Color.clear, lineWidth: 1)
-            )
-            .foregroundStyle(isSelected ? tint : Color.primary.opacity(0.82))
-        }
-        .frame(maxWidth: .infinity)
-        .background(Color.white.opacity(0.001))
-        .contentShape(Rectangle())
-        .buttonStyle(.plain)
+    private func tabWidth(for tab: AppTab) -> CGFloat {
+        108
     }
 
     private func overviewMetric(title: String, value: String, systemImage: String) -> some View {
@@ -534,6 +586,17 @@ struct MenuBarContentView: View {
                     sectionHeader(
                         title: "General",
                         subtitle: "Choose what the menu bar highlights and how switching behaves."
+                    )
+
+                    settingsToggleRow(
+                        "Open Claude Switch when you log into your Mac",
+                        isOn: Binding(
+                            get: { store.launchAtLoginEnabled },
+                            set: {
+                                store.launchAtLoginEnabled = $0
+                                store.syncLaunchAtLogin()
+                            }
+                        )
                     )
 
                     settingsToggleRow(
@@ -893,7 +956,7 @@ struct MenuBarContentView: View {
                     HStack(spacing: 10) {
                         Image(systemName: account.isActive ? "\(account.number).circle.fill" : "\(account.number).circle")
                             .font(.body.weight(.semibold))
-                            .foregroundStyle(account.isActive ? claudeTint : .secondary)
+                            .foregroundStyle(account.isActive ? Color.orange : .secondary)
 
                         Text(account.email)
                             .font(.body.weight(.semibold))
@@ -924,11 +987,11 @@ struct MenuBarContentView: View {
         .padding(14)
         .background(
             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(account.isActive ? claudeTint.opacity(0.12) : Color.white.opacity(0.05))
+                .fill(account.isActive ? Color.orange.opacity(0.12) : Color.white.opacity(0.05))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(account.isActive ? claudeTint.opacity(0.20) : Color.white.opacity(0.06), lineWidth: 1)
+                .stroke(account.isActive ? Color.orange.opacity(0.20) : Color.white.opacity(0.06), lineWidth: 1)
         )
     }
 
@@ -995,20 +1058,6 @@ struct MenuBarContentView: View {
         }
     }
 
-    private var activeTabTint: Color {
-        tint(for: selectedTab)
-    }
-
-    private func tint(for tab: AppTab) -> Color {
-        switch tab {
-        case .claude:
-            return claudeTint
-        case .codex:
-            return codexTint
-        case .settings:
-            return .secondary
-        }
-    }
 }
 
 struct SurfaceCard<Content: View>: View {
@@ -1034,14 +1083,18 @@ struct PillActionButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.caption.weight(.semibold))
+            .foregroundStyle(.primary)
             .padding(.horizontal, 14)
-            .padding(.vertical, 7)
-            .background(Color.white.opacity(configuration.isPressed ? 0.16 : 0.10))
+            .padding(.vertical, 6)
+            .background(
+                Capsule()
+                    .fill(Color.white.opacity(configuration.isPressed ? 0.20 : 0.12))
+            )
             .overlay(
                 Capsule()
-                    .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                    .stroke(Color.white.opacity(0.14), lineWidth: 1)
             )
-            .clipShape(Capsule())
+            .shadow(color: .black.opacity(0.08), radius: 4, y: 1)
             .scaleEffect(configuration.isPressed ? 0.98 : 1)
     }
 }
