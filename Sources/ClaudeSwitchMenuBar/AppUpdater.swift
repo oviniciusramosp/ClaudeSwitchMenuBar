@@ -50,10 +50,10 @@ enum AppUpdaterError: LocalizedError {
             return "Invalid GitHub Releases URL."
         case .unexpectedResponse(let status, let body):
             if status == 404 {
-                return "No GitHub release was found, or the repository needs a token for private access."
+                return "No GitHub release was found for this app yet."
             }
             if status == 401 || status == 403 {
-                return "GitHub denied access. Add a token with private repo access in Settings."
+                return "GitHub denied access. Make sure you're logged into the GitHub CLI on this Mac."
             }
             if let body, !body.isEmpty {
                 return "GitHub Releases error \(status): \(body)"
@@ -173,11 +173,35 @@ struct AppUpdater {
     }
 
     private func scheduleReplacement(from downloadedAppURL: URL, to destinationURL: URL) throws {
+        let destinationDirectory = destinationURL.deletingLastPathComponent()
+        let stagedURL = destinationDirectory.appendingPathComponent(destinationURL.deletingPathExtension().lastPathComponent + ".update.app")
+        let backupURL = destinationDirectory.appendingPathComponent(destinationURL.deletingPathExtension().lastPathComponent + ".backup.app")
+
         let script = """
+        set -euo pipefail
         sleep 1
-        rm -rf "\(destinationURL.path)"
-        cp -R "\(downloadedAppURL.path)" "\(destinationURL.path)"
+        DEST="\(destinationURL.path)"
+        SOURCE="\(downloadedAppURL.path)"
+        STAGED="\(stagedURL.path)"
+        BACKUP="\(backupURL.path)"
+
+        restore_previous() {
+            if [[ ! -d "$DEST" && -d "$BACKUP" ]]; then
+                mv "$BACKUP" "$DEST"
+            fi
+        }
+
+        trap restore_previous EXIT
+
+        rm -rf "$STAGED" "$BACKUP"
+        /usr/bin/ditto "$SOURCE" "$STAGED"
+        if [[ -d "$DEST" ]]; then
+            mv "$DEST" "$BACKUP"
+        fi
+        mv "$STAGED" "$DEST"
         open "\(destinationURL.path)"
+        rm -rf "$BACKUP"
+        trap - EXIT
         """
 
         let process = Process()

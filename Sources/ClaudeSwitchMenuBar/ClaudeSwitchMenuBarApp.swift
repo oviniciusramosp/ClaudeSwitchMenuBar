@@ -61,12 +61,12 @@ enum MenuBarUsageSource: String, CaseIterable, Identifiable {
 
 @MainActor
 final class AccountStore: ObservableObject {
-    @AppStorage("launchAtLoginEnabled") var launchAtLoginEnabled = true
+    @AppStorage("launchAtLoginEnabled") var launchAtLoginEnabled = false
+    @AppStorage("hasInitializedLaunchAtLoginPreference") private var hasInitializedLaunchAtLoginPreference = false
     @AppStorage("autoRestartClaudeAfterSwitch") var autoRestartClaudeAfterSwitch = true
     @AppStorage("menuBarUsageSource") private var menuBarUsageSourceRawValue = MenuBarUsageSource.claude.rawValue
     @AppStorage("showMenuBarUsagePercentage") var showMenuBarUsagePercentage = false
     @AppStorage("automaticallyInstallGitHubUpdates") var automaticallyInstallGitHubUpdates = false
-    @AppStorage("githubUpdaterToken") var githubUpdaterToken = ""
     @Published private(set) var accounts: [ManagedAccount] = []
     @Published private(set) var currentEmail: String?
     @Published private(set) var managedCurrentAccountNumber: Int?
@@ -89,7 +89,7 @@ final class AccountStore: ObservableObject {
         usageByEmail = ClaudeUsageSnapshotStore.load()
         codexSnapshot = CodexUsageSnapshotStore.load()
         weeklyResetOverridesByEmail = WeeklyResetOverrideStore.load()
-        syncLaunchAtLogin()
+        initializeLaunchAtLoginPreferenceIfNeeded()
         refresh(forceUsageRefresh: true)
         startUsageRefreshLoop()
         if automaticallyInstallGitHubUpdates {
@@ -285,15 +285,14 @@ final class AccountStore: ObservableObject {
         updateMessage = "Checking GitHub releases..."
 
         do {
-            let token = normalizedGitHubToken
-            let result = try await updater.checkForUpdate(githubToken: token)
+            let result = try await updater.checkForUpdate(githubToken: nil)
             switch result {
             case .upToDate(let version):
                 updateMessage = "You're up to date on \(version)."
             case .updateAvailable(let release):
                 if installIfAvailable {
                     updateMessage = "Installing \(release.version)..."
-                    try await updater.install(release: release, githubToken: token)
+                    try await updater.install(release: release, githubToken: nil)
                     return
                 } else {
                     updateMessage = "Update available: \(release.version)"
@@ -312,11 +311,6 @@ final class AccountStore: ObservableObject {
         isCheckingForUpdates = false
     }
 
-    private var normalizedGitHubToken: String? {
-        let trimmed = githubUpdaterToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
-
     func syncLaunchAtLogin() {
         do {
             if launchAtLoginEnabled {
@@ -327,6 +321,12 @@ final class AccountStore: ObservableObject {
         } catch {
             updateErrorMessage = "Couldn't configure launch at login: \(error.localizedDescription)"
         }
+    }
+
+    private func initializeLaunchAtLoginPreferenceIfNeeded() {
+        guard !hasInitializedLaunchAtLoginPreference else { return }
+        launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
+        hasInitializedLaunchAtLoginPreference = true
     }
 
     private func startUsageRefreshLoop() {
@@ -640,20 +640,6 @@ struct MenuBarContentView: View {
                         isOn: $store.automaticallyInstallGitHubUpdates
                     )
 
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("GitHub token")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-
-                        SecureField("Optional token for private repo access", text: $store.githubUpdaterToken)
-                            .textFieldStyle(.roundedBorder)
-
-                        Text("Use a GitHub token with `repo` access if you want the updater to read private releases.")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-
                     HStack(spacing: 10) {
                         Button {
                             Task {
@@ -682,7 +668,7 @@ struct MenuBarContentView: View {
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     } else {
-                        Text("The updater looks for a release asset named `Claude Switch.zip`.")
+                        Text("The updater looks for a release asset named `Claude Switch.zip` and uses your GitHub CLI login automatically when needed.")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -804,9 +790,22 @@ struct MenuBarContentView: View {
                     }
                 }
             } else {
-                VStack(spacing: 8) {
-                    ForEach(store.accounts) { account in
-                        accountRow(account)
+                Group {
+                    if shouldConstrainAccountsList {
+                        ScrollView {
+                            VStack(spacing: 8) {
+                                ForEach(store.accounts) { account in
+                                    accountRow(account)
+                                }
+                            }
+                        }
+                        .frame(maxHeight: 470)
+                    } else {
+                        VStack(spacing: 8) {
+                            ForEach(store.accounts) { account in
+                                accountRow(account)
+                            }
+                        }
                     }
                 }
             }
@@ -820,6 +819,10 @@ struct MenuBarContentView: View {
         return store.accounts.isEmpty
             ? "Add your first Claude account after signing in."
             : "\(store.accounts.count) saved account\(store.accounts.count == 1 ? "" : "s") ready to switch."
+    }
+
+    private var shouldConstrainAccountsList: Bool {
+        store.accounts.count > 3
     }
 
     private var codexSection: some View {

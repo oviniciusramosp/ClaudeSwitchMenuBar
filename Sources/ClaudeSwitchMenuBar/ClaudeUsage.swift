@@ -306,7 +306,7 @@ extension ClaudeSwitcherService {
 
     private func normalizedUtilization(_ value: Double?) -> Double {
         guard let value else { return 0 }
-        if value > 1 {
+        if value >= 1 {
             return min(max(value / 100, 0), 1)
         }
         return min(max(value, 0), 1)

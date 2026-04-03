@@ -21,6 +21,10 @@ The repository vendors `cc-account-switcher` directly, so you do not need to ins
 
 ## Development
 
+For a deeper technical reference of the app architecture, runtime behavior, updater flow, data storage, and agent-oriented maintenance notes, see:
+
+- [`docs/KNOWLEDGE_BASE.md`](docs/KNOWLEDGE_BASE.md)
+
 Run the app in debug:
 
 ```bash
