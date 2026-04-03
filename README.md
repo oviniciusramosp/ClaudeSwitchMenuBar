@@ -12,7 +12,7 @@ It lets you:
 
 ## Requirements
 
-- macOS 13+
+- macOS 15+
 - Swift 6 toolchain
 - Claude Code installed for account switching
 - Codex installed and authenticated if you want Codex usage tracking
@@ -44,6 +44,22 @@ dist/Claude Switch.app
 ### Claude
 
 The app reads the current Claude login, integrates with `ccswitch.sh`, and stores managed account state locally. Usage is refreshed periodically and also updated around account switches so the active account stays in sync.
+
+### Adding More Claude Accounts
+
+To add another Claude Code account in the app:
+
+1. Open the `Claude` tab.
+2. Expand `Add Another Account`.
+3. If the account you want is already the one currently signed in to Claude Code, click `Add Current Account`.
+4. If you want to add a different account:
+   - click `Log Out`
+   - click `Browser Login`
+   - complete the Claude login flow in the browser
+   - return to the app
+5. The newly authenticated account is saved and appears under `Configured Accounts`.
+
+After that, you can switch back and forth between saved Claude accounts directly from the app.
 
 ### Codex
 
